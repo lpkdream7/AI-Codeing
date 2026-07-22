@@ -29,7 +29,8 @@ RUN npm config set registry "$NPM_REGISTRY" \
 COPY --from=build --chown=node:node /app/selfhost/dist ./selfhost/dist
 COPY --chown=node:node selfhost/server.mjs ./selfhost/server.mjs
 
-USER node
+# The process starts as root only long enough to read the root-owned Docker
+# secret, then server.mjs permanently drops to UID/GID 1000 before listening.
 EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

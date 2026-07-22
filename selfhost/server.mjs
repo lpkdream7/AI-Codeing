@@ -532,6 +532,7 @@ function positiveInteger(value, fallback, maximum) {
 }
 
 async function start() {
+  dropPrivileges();
   dummyPasswordHash = await argon2.hash(randomBytes(32), {
     type: argon2.argon2id,
     memoryCost: 19_456,
@@ -554,6 +555,18 @@ async function start() {
 
   process.once("SIGTERM", () => void shutdown("SIGTERM"));
   process.once("SIGINT", () => void shutdown("SIGINT"));
+}
+
+function dropPrivileges() {
+  if (typeof process.getuid !== "function" || process.getuid() !== 0) return;
+  const uid = positiveInteger(process.env.APP_UID, 1000, 60_000);
+  const gid = positiveInteger(process.env.APP_GID, 1000, 60_000);
+  process.setgroups([]);
+  process.setgid(gid);
+  process.setuid(uid);
+  if (process.getuid() === 0 || process.getgid() === 0) {
+    throw new Error("Application process failed to drop root privileges");
+  }
 }
 
 start().catch((error) => {
