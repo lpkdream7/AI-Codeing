@@ -1,7 +1,7 @@
 "use client";
 
 import type { CSSProperties, FormEvent, KeyboardEvent } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 type Priority = "high" | "medium" | "low";
 type Filter = "all" | "today" | "upcoming" | "completed";
@@ -73,19 +73,30 @@ function addDays(dateKey: string, days: number) {
 }
 
 export default function Home() {
+  const selfHostedAuth =
+    typeof document !== "undefined" &&
+    document
+      .querySelector('meta[name="today-list-auth-mode"]')
+      ?.getAttribute("content") === "email";
   const [tasks, setTasks] = useState<Task[]>([]);
   const [user, setUser] = useState<UserInfo | null>(null);
   const [title, setTitle] = useState("");
   const [priority, setPriority] = useState<Priority>("medium");
-  const [due, setDue] = useState("");
+  const [due, setDue] = useState(() => toDateKey(new Date()));
   const [filter, setFilter] = useState<Filter>("all");
   const [search, setSearch] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
   const [deletedTask, setDeletedTask] = useState<Task | null>(null);
   const [notice, setNotice] = useState("");
-  const [today, setToday] = useState("");
-  const [dateLabel, setDateLabel] = useState("今天");
+  const [today] = useState(() => toDateKey(new Date()));
+  const [dateLabel] = useState(() =>
+    new Intl.DateTimeFormat("zh-CN", {
+      month: "long",
+      day: "numeric",
+      weekday: "long",
+    }).format(new Date()),
+  );
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("loading");
   const [authRequired, setAuthRequired] = useState(false);
   const [savingTask, setSavingTask] = useState(false);
@@ -140,18 +151,7 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const now = new Date();
-    const todayKey = toDateKey(now);
-    setToday(todayKey);
-    setDue(todayKey);
-    setDateLabel(
-      new Intl.DateTimeFormat("zh-CN", {
-        month: "long",
-        day: "numeric",
-        weekday: "long",
-      }).format(now),
-    );
-    void loadTasks();
+    const initialLoad = window.setTimeout(() => void loadTasks(), 0);
 
     const refresh = () => {
       if (document.visibilityState === "visible") void loadTasks(false);
@@ -162,6 +162,7 @@ export default function Home() {
     window.addEventListener("focus", refresh);
     document.addEventListener("visibilitychange", refresh);
     return () => {
+      window.clearTimeout(initialLoad);
       window.clearInterval(timer);
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", refresh);
@@ -187,7 +188,7 @@ export default function Home() {
     (task) => task.due && today && task.due <= today,
   ).length;
 
-  const visibleTasks = useMemo(() => {
+  const visibleTasks = (() => {
     const query = search.trim().toLocaleLowerCase("zh-CN");
     return tasks
       .filter((task) => {
@@ -207,7 +208,7 @@ export default function Home() {
         if (a.due !== b.due) return a.due ? -1 : 1;
         return b.createdAt.localeCompare(a.createdAt);
       });
-  }, [filter, search, tasks, today]);
+  })();
 
   const filters: { key: Filter; label: string; count: number }[] = [
     { key: "all", label: "全部任务", count: tasks.length },
@@ -372,10 +373,19 @@ export default function Home() {
       <main className="auth-shell">
         <section className="auth-card">
           <span className="brand-mark" aria-hidden="true">✓</span>
-          <span className="eyebrow">CLOUD SYNC</span>
+          <span className="eyebrow">{selfHostedAuth ? "PRIVATE SYNC" : "CLOUD SYNC"}</span>
           <h1>登录后，清单会跟着你。</h1>
-          <p>使用 ChatGPT 账户登录，在手机、平板和电脑上同步同一份任务。</p>
-          <a className="auth-button" href="/signin-with-chatgpt?return_to=%2F">使用 ChatGPT 登录</a>
+          <p>
+            {selfHostedAuth
+              ? "使用邮箱账户登录，在手机、平板和电脑上同步同一份任务。"
+              : "使用 ChatGPT 账户登录，在手机、平板和电脑上同步同一份任务。"}
+          </p>
+          <a
+            className="auth-button"
+            href={selfHostedAuth ? "/login" : "/signin-with-chatgpt?return_to=%2F"}
+          >
+            {selfHostedAuth ? "邮箱登录 / 注册" : "使用 ChatGPT 登录"}
+          </a>
         </section>
       </main>
     );
@@ -410,7 +420,7 @@ export default function Home() {
                 <strong>{user.displayName}</strong>
                 <small>{user.email}</small>
               </span>
-              <a href="/signout-with-chatgpt?return_to=%2F">退出</a>
+              <a href={selfHostedAuth ? "/api/auth/logout" : "/signout-with-chatgpt?return_to=%2F"}>退出</a>
             </div>
           )}
         </div>

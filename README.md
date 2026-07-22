@@ -26,4 +26,12 @@ npm run dev
 
 ## 自托管准备
 
-腾讯云 Ubuntu 22.04、Docker 和 MySQL 的环境准备说明见 [`deploy/SELF_HOSTING.md`](deploy/SELF_HOSTING.md)，数据库初始化脚本位于 [`deploy/mysql/001_init.sql`](deploy/mysql/001_init.sql)。
+腾讯云 Ubuntu、Docker、MySQL、邮箱注册登录和每日备份的完整部署说明见 [`deploy/SELF_HOSTING.md`](deploy/SELF_HOSTING.md)。
+
+最简启动方式：
+
+```bash
+git clone https://github.com/lpkdream7/AI-Codeing.git
+cd AI-Codeing
+sudo bash deploy/start.sh
+```

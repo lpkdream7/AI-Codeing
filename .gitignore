@@ -37,9 +37,14 @@ yarn-error.log*
 # typescript
 next-env.d.ts
 /dist/
+/selfhost/dist/
 /.wrangler/
 /outputs/
 /work/
 /.npm-cache/
 /.codex-dev.*.log
 *.tsbuildinfo
+
+# Self-hosted runtime secrets
+/deploy/mysql/secrets/
+/deploy/secrets/
