@@ -1,10 +1,11 @@
 "use client";
 
 import type { CSSProperties, FormEvent, KeyboardEvent } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Priority = "high" | "medium" | "low";
 type Filter = "all" | "today" | "upcoming" | "completed";
+type SyncStatus = "loading" | "syncing" | "synced" | "error";
 
 type Task = {
   id: string;
@@ -13,36 +14,20 @@ type Task = {
   priority: Priority;
   due: string;
   createdAt: string;
+  updatedAt: string;
+  version: number;
 };
 
-const STORAGE_KEY = "today-list:tasks:v1";
+type UserInfo = {
+  displayName: string;
+  email: string;
+  fullName: string | null;
+};
 
-const starterTasks: Task[] = [
-  {
-    id: "starter-1",
-    title: "整理今天最重要的三件事",
-    completed: false,
-    priority: "high",
-    due: "",
-    createdAt: "2026-01-03T08:00:00.000Z",
-  },
-  {
-    id: "starter-2",
-    title: "预留 30 分钟处理邮件",
-    completed: false,
-    priority: "medium",
-    due: "",
-    createdAt: "2026-01-02T08:00:00.000Z",
-  },
-  {
-    id: "starter-3",
-    title: "记录一个值得继续探索的 AI 想法",
-    completed: true,
-    priority: "low",
-    due: "",
-    createdAt: "2026-01-01T08:00:00.000Z",
-  },
-];
+type LocalTask = Partial<Task> & { title?: unknown };
+
+const LEGACY_STORAGE_KEY = "today-list:tasks:v1";
+const MIGRATION_KEY_PREFIX = "today-list:cloud-migrated:v1:";
 
 const priorityLabel: Record<Priority, string> = {
   high: "重要",
@@ -50,25 +35,46 @@ const priorityLabel: Record<Priority, string> = {
   low: "稍后",
 };
 
+class ApiError extends Error {
+  status: number;
+  data: Record<string, unknown>;
+
+  constructor(status: number, data: Record<string, unknown>) {
+    super(typeof data.error === "string" ? data.error : "请求失败");
+    this.status = status;
+    this.data = data;
+  }
+}
+
+async function requestJson<T>(url: string, options?: RequestInit): Promise<T> {
+  const response = await fetch(url, {
+    ...options,
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      ...options?.headers,
+    },
+  });
+  const data = (await response.json()) as Record<string, unknown>;
+  if (!response.ok) throw new ApiError(response.status, data);
+  return data as T;
+}
+
 function toDateKey(date: Date) {
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
   return local.toISOString().slice(0, 10);
 }
 
 function addDays(dateKey: string, days: number) {
+  if (!dateKey) return "";
   const date = new Date(`${dateKey}T12:00:00`);
   date.setDate(date.getDate() + days);
   return toDateKey(date);
 }
 
-function createId() {
-  return typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
 export default function Home() {
-  const [tasks, setTasks] = useState<Task[]>(starterTasks);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [user, setUser] = useState<UserInfo | null>(null);
   const [title, setTitle] = useState("");
   const [priority, setPriority] = useState<Priority>("medium");
   const [due, setDue] = useState("");
@@ -77,9 +83,61 @@ export default function Home() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
   const [deletedTask, setDeletedTask] = useState<Task | null>(null);
+  const [notice, setNotice] = useState("");
   const [today, setToday] = useState("");
   const [dateLabel, setDateLabel] = useState("今天");
-  const [hydrated, setHydrated] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>("loading");
+  const [authRequired, setAuthRequired] = useState(false);
+  const [savingTask, setSavingTask] = useState(false);
+  const refreshingRef = useRef(false);
+  const cancelEditRef = useRef(false);
+
+  const loadTasks = useCallback(async (allowMigration = true) => {
+    if (refreshingRef.current) return;
+    refreshingRef.current = true;
+    setSyncStatus((current) => (current === "loading" ? "loading" : "syncing"));
+
+    try {
+      const result = await requestJson<{ tasks: Task[]; user: UserInfo }>("/api/tasks");
+      setUser(result.user);
+      setAuthRequired(false);
+
+      let cloudTasks = result.tasks;
+      const migrationKey = `${MIGRATION_KEY_PREFIX}${result.user.email}`;
+      if (allowMigration && cloudTasks.length === 0 && !localStorage.getItem(migrationKey)) {
+        try {
+          const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
+          const localTasks = raw ? (JSON.parse(raw) as LocalTask[]) : [];
+          const validTasks = Array.isArray(localTasks)
+            ? localTasks.filter((task) => typeof task?.title === "string" && task.title.trim())
+            : [];
+          if (validTasks.length) {
+            const imported = await requestJson<{ tasks: Task[] }>("/api/tasks/import", {
+              method: "POST",
+              body: JSON.stringify({ tasks: validTasks }),
+            });
+            cloudTasks = imported.tasks;
+            setNotice(`已将 ${imported.tasks.length} 条旧任务迁移到云端`);
+          }
+          localStorage.setItem(migrationKey, "done");
+        } catch {
+          setNotice("旧任务暂未迁移，可稍后重新同步");
+        }
+      }
+
+      setTasks(cloudTasks);
+      setSyncStatus("synced");
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setAuthRequired(true);
+      } else {
+        setSyncStatus("error");
+        setNotice(error instanceof Error ? error.message : "云端同步暂时不可用");
+      }
+    } finally {
+      refreshingRef.current = false;
+    }
+  }, []);
 
   useEffect(() => {
     const now = new Date();
@@ -93,30 +151,22 @@ export default function Home() {
         weekday: "long",
       }).format(now),
     );
+    void loadTasks();
 
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed)) setTasks(parsed);
-      } else {
-        setTasks(
-          starterTasks.map((task, index) => ({
-            ...task,
-            due: index === 1 ? addDays(todayKey, 1) : todayKey,
-          })),
-        );
-      }
-    } catch {
-      setTasks(starterTasks);
-    } finally {
-      setHydrated(true);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (hydrated) localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
-  }, [hydrated, tasks]);
+    const refresh = () => {
+      if (document.visibilityState === "visible") void loadTasks(false);
+    };
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void loadTasks(false);
+    }, 20_000);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [loadTasks]);
 
   useEffect(() => {
     if (!deletedTask) return;
@@ -124,11 +174,15 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [deletedTask]);
 
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(""), 4500);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
   const activeTasks = tasks.filter((task) => !task.completed);
   const completedCount = tasks.length - activeTasks.length;
-  const progress = tasks.length
-    ? Math.round((completedCount / tasks.length) * 100)
-    : 0;
+  const progress = tasks.length ? Math.round((completedCount / tasks.length) * 100) : 0;
   const todayCount = activeTasks.filter(
     (task) => task.due && today && task.due <= today,
   ).length;
@@ -137,9 +191,7 @@ export default function Home() {
     const query = search.trim().toLocaleLowerCase("zh-CN");
     return tasks
       .filter((task) => {
-        if (query && !task.title.toLocaleLowerCase("zh-CN").includes(query)) {
-          return false;
-        }
+        if (query && !task.title.toLocaleLowerCase("zh-CN").includes(query)) return false;
         if (filter === "today") {
           return !task.completed && !!task.due && !!today && task.due <= today;
         }
@@ -168,60 +220,133 @@ export default function Home() {
     { key: "completed", label: "已完成", count: completedCount },
   ];
 
-  function addTask(event: FormEvent<HTMLFormElement>) {
+  async function addTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const cleanTitle = title.trim();
-    if (!cleanTitle) return;
+    if (!cleanTitle || savingTask) return;
+    setSavingTask(true);
+    setSyncStatus("syncing");
 
-    const task: Task = {
-      id: createId(),
-      title: cleanTitle,
-      completed: false,
-      priority,
-      due,
-      createdAt: new Date().toISOString(),
-    };
-    setTasks((current) => [task, ...current]);
-    setTitle("");
-    setFilter("all");
+    try {
+      const result = await requestJson<{ task: Task }>("/api/tasks", {
+        method: "POST",
+        body: JSON.stringify({ title: cleanTitle, priority, due }),
+      });
+      setTasks((current) => [result.task, ...current]);
+      setTitle("");
+      setFilter("all");
+      setSyncStatus("synced");
+    } catch (error) {
+      setSyncStatus("error");
+      setNotice(error instanceof Error ? error.message : "任务保存失败");
+    } finally {
+      setSavingTask(false);
+    }
   }
 
-  function toggleTask(id: string) {
-    setTasks((current) =>
-      current.map((task) =>
-        task.id === id ? { ...task, completed: !task.completed } : task,
-      ),
-    );
+  async function updateTask(task: Task, changes: Partial<Pick<Task, "title" | "completed" | "priority" | "due">>) {
+    const optimistic = { ...task, ...changes };
+    setTasks((current) => current.map((item) => (item.id === task.id ? optimistic : item)));
+    setSyncStatus("syncing");
+
+    try {
+      const result = await requestJson<{ task: Task }>(`/api/tasks/${encodeURIComponent(task.id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ ...changes, version: task.version }),
+      });
+      setTasks((current) => current.map((item) => (item.id === task.id ? result.task : item)));
+      setSyncStatus("synced");
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        setNotice("检测到另一台设备的更新，已载入最新内容");
+        await loadTasks(false);
+      } else {
+        setTasks((current) => current.map((item) => (item.id === task.id ? task : item)));
+        setSyncStatus("error");
+        setNotice(error instanceof Error ? error.message : "任务更新失败");
+      }
+    }
   }
 
-  function deleteTask(task: Task) {
+  async function deleteTask(task: Task) {
     setTasks((current) => current.filter((item) => item.id !== task.id));
-    setDeletedTask(task);
+    setSyncStatus("syncing");
+    try {
+      await requestJson<{ deleted: boolean }>(
+        `/api/tasks/${encodeURIComponent(task.id)}?version=${task.version}`,
+        { method: "DELETE" },
+      );
+      setDeletedTask(task);
+      setSyncStatus("synced");
+    } catch (error) {
+      setTasks((current) => [task, ...current]);
+      if (error instanceof ApiError && error.status === 409) await loadTasks(false);
+      setSyncStatus("error");
+      setNotice(error instanceof Error ? error.message : "任务删除失败");
+    }
+  }
+
+  async function undoDelete() {
+    if (!deletedTask) return;
+    const task = deletedTask;
+    setDeletedTask(null);
+    setSyncStatus("syncing");
+    try {
+      const result = await requestJson<{ task: Task }>("/api/tasks", {
+        method: "POST",
+        body: JSON.stringify({
+          title: task.title,
+          priority: task.priority,
+          due: task.due,
+          completed: task.completed,
+        }),
+      });
+      setTasks((current) => [result.task, ...current]);
+      setSyncStatus("synced");
+    } catch (error) {
+      setSyncStatus("error");
+      setNotice(error instanceof Error ? error.message : "撤销失败");
+    }
+  }
+
+  async function clearCompleted() {
+    const removed = tasks.filter((task) => task.completed);
+    setTasks((current) => current.filter((task) => !task.completed));
+    setSyncStatus("syncing");
+    try {
+      await requestJson<{ deleted: number }>("/api/tasks", { method: "DELETE" });
+      setSyncStatus("synced");
+    } catch (error) {
+      setTasks((current) => [...current, ...removed]);
+      setSyncStatus("error");
+      setNotice(error instanceof Error ? error.message : "清除失败");
+    }
   }
 
   function startEditing(task: Task) {
+    cancelEditRef.current = false;
     setEditingId(task.id);
     setEditingTitle(task.title);
   }
 
-  function saveEditing() {
-    const cleanTitle = editingTitle.trim();
-    if (editingId && cleanTitle) {
-      setTasks((current) =>
-        current.map((task) =>
-          task.id === editingId ? { ...task, title: cleanTitle } : task,
-        ),
-      );
+  function saveEditing(task: Task) {
+    if (cancelEditRef.current) {
+      cancelEditRef.current = false;
+      return;
     }
+    const cleanTitle = editingTitle.trim();
     setEditingId(null);
     setEditingTitle("");
+    if (cleanTitle && cleanTitle !== task.title) void updateTask(task, { title: cleanTitle });
   }
 
   function handleEditKey(event: KeyboardEvent<HTMLInputElement>) {
-    if (event.key === "Enter") saveEditing();
+    if (event.key === "Enter") event.currentTarget.blur();
     if (event.key === "Escape") {
+      cancelEditRef.current = true;
       setEditingId(null);
       setEditingTitle("");
+      event.currentTarget.blur();
     }
   }
 
@@ -230,17 +355,31 @@ export default function Home() {
     if (dateKey === today) return "今天";
     if (dateKey === addDays(today, 1)) return "明天";
     if (today && dateKey < today) return "已逾期";
-    return new Intl.DateTimeFormat("zh-CN", {
-      month: "short",
-      day: "numeric",
-    }).format(new Date(`${dateKey}T12:00:00`));
+    return new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric" }).format(
+      new Date(`${dateKey}T12:00:00`),
+    );
   }
 
-  const emptyMessage = search
-    ? "没有找到匹配的任务"
-    : filter === "completed"
-      ? "完成第一件事后，它会出现在这里"
-      : "这里很安静，正适合添加一件重要的事";
+  const syncLabel = {
+    loading: "正在载入云端任务",
+    syncing: "正在同步",
+    synced: "所有设备已同步",
+    error: "同步遇到问题",
+  }[syncStatus];
+
+  if (authRequired) {
+    return (
+      <main className="auth-shell">
+        <section className="auth-card">
+          <span className="brand-mark" aria-hidden="true">✓</span>
+          <span className="eyebrow">CLOUD SYNC</span>
+          <h1>登录后，清单会跟着你。</h1>
+          <p>使用 ChatGPT 账户登录，在手机、平板和电脑上同步同一份任务。</p>
+          <a className="auth-button" href="/signin-with-chatgpt?return_to=%2F">使用 ChatGPT 登录</a>
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="app-shell">
@@ -249,17 +388,32 @@ export default function Home() {
           <span className="brand-mark" aria-hidden="true">✓</span>
           <span>今日清单</span>
         </a>
-        <span className="topbar-date">{dateLabel}</span>
-        <label className="search-box">
-          <span aria-hidden="true">⌕</span>
-          <span className="sr-only">搜索任务</span>
-          <input
-            type="search"
-            placeholder="搜索任务"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-          />
-        </label>
+        <button className={`sync-pill ${syncStatus}`} type="button" onClick={() => void loadTasks(false)}>
+          <span aria-hidden="true" />
+          {syncLabel}
+        </button>
+        <div className="topbar-actions">
+          <label className="search-box">
+            <span aria-hidden="true">⌕</span>
+            <span className="sr-only">搜索任务</span>
+            <input
+              type="search"
+              placeholder="搜索任务"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+          </label>
+          {user && (
+            <div className="account-menu">
+              <span className="account-avatar" aria-hidden="true">{user.displayName.slice(0, 1).toUpperCase()}</span>
+              <span className="account-copy">
+                <strong>{user.displayName}</strong>
+                <small>{user.email}</small>
+              </span>
+              <a href="/signout-with-chatgpt?return_to=%2F">退出</a>
+            </div>
+          )}
+        </div>
       </header>
 
       <div className="workspace" id="top">
@@ -301,7 +455,7 @@ export default function Home() {
 
           <div className="sidebar-note">
             <span aria-hidden="true">↗</span>
-            <p>把注意力留给真正重要的事。</p>
+            <p>云端保存已开启，换台设备也能继续。</p>
           </div>
         </aside>
 
@@ -344,9 +498,9 @@ export default function Home() {
                 <span className="sr-only">截止日期</span>
                 <input type="date" value={due} onChange={(event) => setDue(event.target.value)} />
               </label>
-              <button className="add-button" type="submit" disabled={!title.trim()}>
+              <button className="add-button" type="submit" disabled={!title.trim() || savingTask}>
                 <span aria-hidden="true">＋</span>
-                添加任务
+                {savingTask ? "保存中" : "添加任务"}
               </button>
             </div>
           </form>
@@ -357,18 +511,19 @@ export default function Home() {
               <span>{visibleTasks.length} 项</span>
             </div>
             {completedCount > 0 && (
-              <button
-                type="button"
-                className="text-button"
-                onClick={() => setTasks((current) => current.filter((task) => !task.completed))}
-              >
+              <button type="button" className="text-button" onClick={() => void clearCompleted()}>
                 清除已完成
               </button>
             )}
           </div>
 
-          <div className="task-list" aria-live="polite">
-            {visibleTasks.length ? (
+          <div className="task-list" aria-live="polite" aria-busy={syncStatus === "loading"}>
+            {syncStatus === "loading" ? (
+              <div className="cloud-loading">
+                <span aria-hidden="true" />
+                正在载入你的云端清单…
+              </div>
+            ) : visibleTasks.length ? (
               visibleTasks.map((task) => (
                 <article className={`task-card ${task.completed ? "completed" : ""}`} key={task.id}>
                   <button
@@ -376,7 +531,7 @@ export default function Home() {
                     className="task-check"
                     aria-label={task.completed ? `标记“${task.title}”为未完成` : `完成“${task.title}”`}
                     aria-pressed={task.completed}
-                    onClick={() => toggleTask(task.id)}
+                    onClick={() => void updateTask(task, { completed: !task.completed })}
                   >
                     <span aria-hidden="true">{task.completed ? "✓" : ""}</span>
                   </button>
@@ -389,7 +544,7 @@ export default function Home() {
                         autoFocus
                         value={editingTitle}
                         onChange={(event) => setEditingTitle(event.target.value)}
-                        onBlur={saveEditing}
+                        onBlur={() => saveEditing(task)}
                         onKeyDown={handleEditKey}
                       />
                     ) : (
@@ -400,43 +555,42 @@ export default function Home() {
                       <span className={today && task.due && task.due < today && !task.completed ? "overdue" : ""}>
                         {dueLabel(task.due)}
                       </span>
+                      <span>v{task.version}</span>
                     </div>
                   </div>
 
                   <div className="task-actions">
                     <button type="button" aria-label={`编辑“${task.title}”`} onClick={() => startEditing(task)}>✎</button>
-                    <button type="button" aria-label={`删除“${task.title}”`} onClick={() => deleteTask(task)}>×</button>
+                    <button type="button" aria-label={`删除“${task.title}”`} onClick={() => void deleteTask(task)}>×</button>
                   </div>
                 </article>
               ))
             ) : (
               <div className="empty-state">
                 <span aria-hidden="true">○</span>
-                <h3>暂时没有任务</h3>
-                <p>{emptyMessage}</p>
+                <h3>云端清单还是空的</h3>
+                <p>{search ? "没有找到匹配的任务" : "添加第一件重要的事，它会自动同步到所有设备"}</p>
               </div>
             )}
           </div>
 
           <footer className="app-footer">
-            <span className="status-dot" aria-hidden="true" />
-            任务已自动保存在当前设备
+            <span className={`status-dot ${syncStatus}`} aria-hidden="true" />
+            {syncLabel}
           </footer>
         </section>
       </div>
 
       {deletedTask && (
         <div className="toast" role="status">
-          <span>任务已删除</span>
-          <button
-            type="button"
-            onClick={() => {
-              setTasks((current) => [deletedTask, ...current]);
-              setDeletedTask(null);
-            }}
-          >
-            撤销
-          </button>
+          <span>任务已从云端删除</span>
+          <button type="button" onClick={() => void undoDelete()}>撤销</button>
+        </div>
+      )}
+      {notice && !deletedTask && (
+        <div className="toast" role="status">
+          <span>{notice}</span>
+          <button type="button" onClick={() => setNotice("")}>知道了</button>
         </div>
       )}
     </main>
