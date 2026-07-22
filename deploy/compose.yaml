@@ -47,6 +47,7 @@ services:
     image: today-list-app:0.3.0
     container_name: today-list-app
     restart: unless-stopped
+    init: true
     environment:
       NODE_ENV: production
       PORT: 3000

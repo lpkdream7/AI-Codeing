@@ -21,10 +21,6 @@ ENV NODE_ENV=production \
     PORT=3000
 
 WORKDIR /app
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates dumb-init \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY package.json package-lock.json ./
 RUN npm config set registry "$NPM_REGISTRY" \
     && npm ci --omit=dev \
@@ -39,5 +35,4 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:3000/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
 
-ENTRYPOINT ["dumb-init", "--"]
 CMD ["node", "selfhost/server.mjs"]
