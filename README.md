@@ -23,3 +23,7 @@ npm run dev
 ```
 
 打开 `http://localhost:3000` 即可使用。
+
+## 自托管准备
+
+腾讯云 Ubuntu 22.04、Docker 和 MySQL 的环境准备说明见 [`deploy/SELF_HOSTING.md`](deploy/SELF_HOSTING.md)，数据库初始化脚本位于 [`deploy/mysql/001_init.sql`](deploy/mysql/001_init.sql)。
