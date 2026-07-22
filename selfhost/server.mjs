@@ -57,6 +57,7 @@ app.use(
         objectSrc: ["'none'"],
         scriptSrc: ["'self'"],
         styleSrc: ["'self'", "'unsafe-inline'"],
+        upgradeInsecureRequests: cookieSecure ? [] : null,
       },
     },
   }),
