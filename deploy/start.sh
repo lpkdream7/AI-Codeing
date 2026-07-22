@@ -28,6 +28,9 @@ for name in mysql_app_password mysql_root_password; do
   chmod 0600 "secrets/$name"
 done
 
+docker volume inspect today-list-mysql-data >/dev/null 2>&1 || \
+  docker volume create today-list-mysql-data >/dev/null
+
 existing_project="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' today-list-mysql 2>/dev/null || true)"
 if [[ -n "$existing_project" && "$existing_project" != "today-list" ]]; then
   echo "MySQL is currently managed by Compose project '$existing_project'." >&2

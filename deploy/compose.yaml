@@ -125,6 +125,7 @@ secrets:
 volumes:
   mysql_data:
     name: today-list-mysql-data
+    external: true
   caddy_data:
     name: today-list-caddy-data
   caddy_config:
